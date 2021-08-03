@@ -1,0 +1,283 @@
+<div id="app">
+    <h3>{{title}}</h3>
+</div>
+
+
+<script>
+    //接收obj,代理它，实它成为响应式的
+    //替换Object.defineProperty()
+    function reactive(obj) {
+        return new Proxy(obj, {
+            get(target, key) {
+                console.log('get', key);
+
+                // 依赖收集
+                track(target, key)
+                return target[key]
+            },
+            set(target, key, val) {
+                console.log('set', key);
+                target[key] = val;
+                //如果有数据改变就调用一下实例中的update方法
+                // app.update()
+
+                //触发依赖
+                trigger(target, key)
+            }
+        })
+    }
+
+    //添加副作用函数
+    const effectStack = [];
+
+    function effect(fn) {
+        //如果fn中用到了响应式数据，当它们发生变化时，fn会再次执行，称为副作用函数
+        const eff = function() {
+                try {
+                    effectStack.push(eff)
+                    fn()
+                } finally {
+                    effectStack.pop()
+                }
+            }
+            //执行一次，触发依赖收集
+        eff()
+
+        return eff;
+
+    }
+
+    const targetMap = {}
+        //依赖收集函数track
+    function track(target, key) {
+        //获取副作用函数
+        const effect = effectStack[effectStack.length - 1];
+        if (effect) {
+            let map = targetMap[target]
+            if (!map) {
+                map = targetMap[target] = {}
+            }
+
+            let deps = map[key]
+            if (!deps) {
+                deps = map[key] = []
+            }
+
+            //将副作用函数放入deps
+            if (deps.indexOf(effect) === -1) {
+                deps.push(effect)
+            }
+        }
+    }
+
+    function trigger(target, key) {
+        const map = targetMap[target]
+        if (map) {
+            const deps = map[key]
+            if (deps) {
+                deps.forEach(dep => dep());
+            }
+        }
+    }
+
+    function h(tag, props, children) {
+        return {
+            tag,
+            props,
+            children
+        }
+    }
+
+    //createApp返回应用程序实例是什么样子
+    const Vue = {
+        createApp(options) {
+            //暴露给浏览器平台
+            const renderer = Vue.createRenderer({
+                querySelector(selector) {
+                    return document.querySelector(selector)
+                },
+                insert(child, parent, anchor) {
+                    parent.insertBefore(child, anchor || null)
+                },
+                createElement(tag) {
+                    return document.createElement(tag)
+                }
+            })
+            return renderer.createApp(options)
+        },
+        createRenderer({
+            querySelector,
+            insert,
+            createElement
+        }) {
+            //返回自定义渲染器,封装平台可扩展性
+            return {
+                createApp(options) {
+                    //返回的就是app实例
+                    return {
+                        // mount的作用
+                        //1.根据用户传入的选择器去获取当前的宿主元素
+                        //2.拿到宿主元素的innerHTML作为template
+                        //3.通过编译得到渲染函数
+                        //4.通过这个渲染函数可以得到真正的dom节点，把用户传进去的数据，状态等结合生成最后的结果
+                        //5.最后追加到宿主元素上去
+                        mount(selector) {
+                            //mount的目标是什么
+                            // const parent = document.querySelector(selector) //宿主元素
+                            const parent = querySelector(selector) //宿主元素，封装平台可扩展性
+
+                            // 需要将组件配置解析为dom，通过render函数实现
+                            if (!options.render) {
+                                options.render = this.compile(parent.innerHTML)
+                            }
+
+                            // 兼容options api
+                            if (options.setup) {
+                                this.setupState = options.setup()
+                            } else {
+                                this.data = options.data()
+                            }
+                            //Proxy，确定render数据从哪里获取
+                            this.proxy = new Proxy(this, {
+                                get(target, key) {
+                                    if (key in target.setupState) {
+                                        return target.setupState[key]
+                                    } else {
+                                        return target.data[key]
+                                    }
+                                },
+                                set(target, key, val) {
+                                    if (key in target.setupState) {
+                                        target.setupState[key] = val
+                                    } else {
+                                        target.data[key] = val
+                                    }
+                                }
+                            })
+
+                            //app实例上加了一个更新函数
+                            this.update = effect(() => {
+                                    // 直接操作dom的写法，这样每次都是全部更新
+                                    // //将用户传进来的data给绑定当前元素中
+                                    // const el = options.render.call(this.proxy)
+
+                                    // //追加到宿主元素上去
+                                    // parent.innerHTML = ''
+                                    //     // parent.appendChild(el)
+                                    // insert(el, parent) //封装平台可扩展性,跨平台
+
+                                    // 虚拟dom写法
+                                    // 获取虚拟dom
+                                    const vnode = options.render.call(this.proxy)
+                                    if (!this.isMounted) {
+                                        //mounted,初始化
+                                        //vnode => dom
+                                        const el = this.createElm(vnode)
+                                        parent.innerHTML = ''
+                                        insert(el, parent)
+
+                                        this.isMounted = true
+                                    } else {
+                                        //update,更新,diff
+                                        this.patch(this._vnode, vnode)
+                                    }
+
+                                    //存储每一次的虚拟dom结果，便于下次做对比
+                                    this._vnode = vnode
+                                })
+                                //初始化
+                            this.update()
+                        },
+
+                        // 将vnode变成真实dom
+                        createElm(vnode) {
+                            const el = createElement(vnode.tag)
+                                //todo props
+                                //children
+                            if (typeof vnode.children === 'string') {
+                                el.textContent = vnode.children
+                            } else {
+                                // 含有子元素，递归
+                                vnode.children.forEach(child => {
+                                    insert(this.createElm(child), el)
+                                })
+                            }
+
+                            vnode.el = el
+                            return el
+                        },
+
+                        // n1:老节点，n2:新节点,对比更新
+                        patch(n1, n2) {
+                            const el = n2.el = n1.el
+                                //判断双方是否是相同节点
+                            if (n1.tag === n2.tag) {
+                                //todo props
+                                //children
+                                const oldCh = n1.children
+                                const newCh = n2.children
+
+                                if (typeof oldCh === 'string') {
+                                    if (typeof newCh === 'string') {
+                                        //只是简单的文本更新
+                                        if (oldCh !== newCh) {
+                                            el.textContent = newCh
+                                        }
+                                    } else {
+                                        //将新的节点循环遍历追加到el中去即可
+                                        el.textContent = ''
+                                        newCh.forEach(child => insert(this.createElm(child), el))
+                                    }
+                                } else {
+                                    if (typeof newCh === 'string') {
+                                        //replace elements with text,用字符串替换节点
+                                        el.textContent = newCh
+                                    } else {
+                                        // 如果新的dom是数组。。。
+                                        // [a,b,c] => [a,b]，会有一些diff算法优化处理等，这里省略
+                                    }
+                                }
+
+                            }
+                        },
+
+                        compile(template) {
+                            //实际上会有很多树的操作，在此省略
+                            return function render() {
+                                // 简单写法
+                                // const h3 = document.createElement('h3')
+                                // h3.textContent = this.title
+                                // return h3
+
+                                // 虚拟dom写法，返回vnode
+                                return h('h3', null, this.title)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+</script>
+<script>
+    const {
+        createApp
+    } = Vue
+    const app = createApp({
+        data() {
+            return {
+                title: "helle vue3"
+            }
+        },
+        setup() {
+            const state = reactive({
+                title: "helle vue3!!!"
+            })
+            setTimeout(() => {
+                state.title = "hello,变化"
+            }, 2000);
+            return state
+        }
+    })
+    app.mount("#app")
+</script>
