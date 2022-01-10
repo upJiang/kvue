@@ -1,4 +1,4 @@
-reactive(obj) //接收obj,代理它，实它成为响应式的
+reactive(obj) //接收obj,代理它，使它成为响应式的
 
 副作用函数，当fn中的响应式数据变化时，会主动触发fn的调用，相当于vue3中的watchEffect 跟react中的useEffect
 
